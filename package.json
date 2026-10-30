@@ -1,0 +1,23 @@
+{
+  "name": "solwatch-1u-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SolWatch-1U ground-station mission dashboard (SatForge UAE 2026)",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "npx serve out",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "^15.5.28",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "typescript": "^5.9.3"
+  }
+}

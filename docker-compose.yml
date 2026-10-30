@@ -1,0 +1,12 @@
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_BASE_PATH: ""
+    image: solwatch-1u-frontend:latest
+    container_name: solwatch-frontend
+    ports:
+      - "3000:80"
+    restart: unless-stopped
