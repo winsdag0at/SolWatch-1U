@@ -5,7 +5,7 @@ import { GroundProcessor, STATE_INFO, type Packet } from '@/lib/ground';
 import { FARMS, farmName } from '@/lib/farms';
 import { SCENARIOS, Simulator } from '@/lib/sim';
 import { DOLP_CLEAN, channelsFor, stokes, soilingIndex, dewPoint } from '@/lib/physics';
-import { DEFAULT_LIVE, connectLive, extractPackets, type LiveConfig } from '@/lib/live';
+import { BUILT_IN_LIVE_URL, DEFAULT_LIVE, connectLive, extractPackets, type LiveConfig } from '@/lib/live';
 import { ago, fmtClock, fmtDate, fmtTime, signed } from './format';
 import { CH_COLORS } from './charts';
 import { FlowDiagram } from './visuals';
@@ -40,6 +40,7 @@ const SAMPLE_S = { type: 'S', farm: 'AlDhafra', t: '2026-11-01T06:30:00Z', i0: 2
 const SAMPLE_N = { type: 'N', farm: 'AlDhafra', t: '2026-11-01T02:10:00Z', air_t: 19.5, rh: 88, glass_t: 16.0, wet_plate: 540 };
 
 function loadLiveCfg(): LiveConfig {
+  if (BUILT_IN_LIVE_URL) return DEFAULT_LIVE;
   try {
     const s = localStorage.getItem('solwatch.live');
     return s ? { ...DEFAULT_LIVE, ...JSON.parse(s) } : DEFAULT_LIVE;
@@ -72,7 +73,7 @@ export default function Dashboard() {
   const [rangeKey, setRangeKey] = useState<RangeKey>('24h');
   const [wall, setWall] = useState<number | null>(null);
   const [liveCfg, setLiveCfg] = useState<LiveConfig>(DEFAULT_LIVE);
-  const [liveOn, setLiveOn] = useState(false);
+  const [liveOn, setLiveOn] = useState(!!BUILT_IN_LIVE_URL); // auto-connect when the URL is baked in
   const [liveStatus, setLiveStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const [paste, setPaste] = useState(JSON.stringify(SAMPLE_S));
   const [tab, setTabState] = useState<Tab>('ops');

@@ -32,8 +32,8 @@ export const DEFAULT_LINK: LinkConfig = {
   sf: 11,
   bwKHz: 125,
   requiredMarginDb: 3,
-  sBytes: 24,
-  nBytes: 14,
+  sBytes: 26, // firmware/include/solwatch_packet.h
+  nBytes: 16,
   sEveryMin: 10,
   nEveryMin: 15,
 };

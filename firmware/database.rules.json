@@ -1,0 +1,13 @@
+{
+  "rules": {
+    "solwatch": {
+      "packets": {
+        ".read": true,
+        "$id": {
+          ".write": "auth != null && auth.uid === 'REPLACE_WITH_GROUND_STATION_UID' && !data.exists()",
+          ".validate": "newData.hasChildren(['type', 'farm', 't']) && (newData.child('type').val() === 'S' || newData.child('type').val() === 'N') && newData.child('farm').isString() && newData.child('farm').val().length <= 40 && newData.child('t').isString() && newData.child('t').val().length <= 30"
+        }
+      }
+    }
+  }
+}

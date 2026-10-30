@@ -57,6 +57,13 @@ Budget, bench and impact inputs are saved in the browser (localStorage).
 | `lib/live.ts` | Live connectors: Firebase RTDB stream, HTTP JSON poll, ThingSpeak feed |
 | `components/` | Dashboard UI and the hand-built SVG charts (no chart library) |
 
+## Hardware → dashboard
+
+`firmware/` holds the ESP32 programs (satellite, ground station, dew node) and the Firebase rules. Follow [firmware/README.md](firmware/README.md) to:
+- wire the boards;
+- set up Firebase;
+- point the dashboard at your database with `NEXT_PUBLIC_LIVE_URL`, so Live mode connects automatically for every visitor.
+
 ## Live mode: data contract
 
 The ground-station ESP32 appends each received LoRa packet to a cloud relay, and the dashboard reads from it. A static page cannot accept a POST, so the relay sits in between.

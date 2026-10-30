@@ -12,11 +12,17 @@ export interface LiveConfig {
   pollSec: number;
 }
 
+/** Set NEXT_PUBLIC_LIVE_URL at build time (e.g. in Vercel) to pre-configure Live mode for every visitor. */
+export const BUILT_IN_LIVE_URL = process.env.NEXT_PUBLIC_LIVE_URL || '';
+
 export const DEFAULT_LIVE: LiveConfig = {
   kind: 'firebase',
-  url: 'https://YOUR-PROJECT-default-rtdb.firebaseio.com/solwatch/packets',
+  url: BUILT_IN_LIVE_URL || 'https://YOUR-PROJECT-default-rtdb.firebaseio.com/solwatch/packets',
   pollSec: 3,
 };
+
+/** Packets the Firebase stream starts with (newest N); older ones stay in the database. */
+const FIREBASE_HISTORY = 300;
 
 export interface LiveHandlers {
   onPackets: (pkts: Packet[]) => void;
@@ -70,7 +76,8 @@ export function connectLive(cfg: LiveConfig, h: LiveHandlers): () => void {
 
   if (cfg.kind === 'firebase' && typeof EventSource !== 'undefined') {
     // Firebase RTDB REST streaming (Server-Sent Events)
-    const url = base.endsWith('.json') ? base : `${base}.json`;
+    const json = base.split('?')[0].endsWith('.json') ? base : `${base}.json`;
+    const url = json.includes('?') ? json : `${json}?orderBy=${encodeURIComponent('"$key"')}&limitToLast=${FIREBASE_HISTORY}`;
     const es = new EventSource(url);
     h.onStatus({ ok: true, msg: `Connecting to ${url} …` });
     const onData = (ev: MessageEvent) => {
