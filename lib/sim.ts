@@ -2,18 +2,13 @@
 // polarimeter, the farm dew nodes and the LoRa store-and-forward link.
 // Every packet it produces is SIMULATED and flagged as such in the UI.
 
-import { FARMS } from './farms';
+import { FARMS, GROUND_STATION } from './farms';
 import {
   DOLP_CLEAN, channelsFor, clamp, rhFromDewPoint, battPercent, battVoltsFromPercent, dewPoint,
 } from './physics';
 import { GroundProcessor, NPacket, Packet, SPacket } from './ground';
-
-export const ORBIT_MIN = 95;
-export const SUNLIT_MIN = 60;
-// Ground-station visibility per orbit. Compressed for the demo (a real LEO
-// pass over one station is ~8–10 min, 2–4 times a day).
-export const PASS_START = 38;
-export const PASS_END = 68;
+import { DEFAULT_ORBIT, OrbitModel, type OrbitConfig, type Pass } from './orbit';
+import { DEFAULT_LINK, airtimeMs, linkBudget, type LinkConfig } from './link';
 
 const MIN = 60_000;
 const S0_NOMINAL = 2.82; // V, gives the 2.59/1.41/0.23/1.41 clean reading
@@ -63,12 +58,18 @@ export function sunFactor(t: number) {
 }
 
 export interface OrbitState {
-  phaseMin: number; // 0..95
+  t: number;
+  lat: number; lon: number;
   sunlit: boolean;
-  inPass: boolean;
-  passFrac: number; // 0..1 progress through pass, -1 when not in pass
-  elevation: number; // deg
+  inPass: boolean; // above the ground-station mask
+  elevation: number; az: number; rangeKm: number; // look angles from the GS
+  marginDb: number | null; // link margin when above the mask
+  phaseMin: number; // minutes since ascending node
+  periodMin: number;
   minsToPass: number;
+  minsToSunChange: number | null;
+  currentPass: Pass | null;
+  nextPass: Pass | null;
   orbitNo: number;
 }
 
@@ -84,12 +85,20 @@ export class Simulator {
   autoCrew = true;
   farms: FarmSim[];
   store: Packet[] = [];
+  storeCap = 4000; // packets the OBC flash buffer holds
   relayed = 0;
   generated = 0;
+  dropped = 0;
+  link: LinkConfig = { ...DEFAULT_LINK };
+  /** EPS model, kept in sync with the Mission page power budget. */
+  power = { loadW: 0.21, txW: 0.4, genSunlitW: 1.5, battWh: 11.1, busV: 3.3 };
+  orbitModel!: OrbitModel;
+  private passCache: { from: number; to: number; passes: Pass[] } = { from: 0, to: 0, passes: [] };
 
-  constructor(public ground: GroundProcessor, startT: number) {
+  constructor(public ground: GroundProcessor, startT: number, orbitCfg: OrbitConfig = DEFAULT_ORBIT) {
     this.t = startT;
-    this.epoch = startT - 17 * MIN;
+    this.epoch = startT;
+    this.setOrbit(orbitCfg, 12);
     const init: Record<string, [number, number, number, number]> = {
       // dust, baseAir, dew-point base, dust rate (inland sites soil faster)
       AlDhafra: [0.08, 26, 17.6, 0.00016],
@@ -107,21 +116,70 @@ export class Simulator {
     return this.farms.find((f) => f.id === id)!;
   }
 
+  /**
+   * Switch the candidate orbit. The in-orbit phase (and node for non-SSO
+   * orbits) depends on the launch date, so it is chosen to give a pass
+   * shortly after `t` — real pass times need the TLE after deployment.
+   */
+  setOrbit(cfg: OrbitConfig, leadMin = 10) {
+    this.orbitModel = new OrbitModel(cfg, this.epoch, GROUND_STATION);
+    this.orbitModel.phaseForPassAt(this.t, leadMin);
+    this.passCache = { from: 0, to: 0, passes: [] };
+  }
+
+  passes(): Pass[] {
+    if (this.t < this.passCache.from || this.t > this.passCache.to - 20 * 3_600_000) {
+      const from = this.t - 30 * 3_600_000;
+      this.passCache = { from, to: this.t + 30 * 3_600_000, passes: this.orbitModel.passes(from, 60) };
+    }
+    return this.passCache.passes;
+  }
+
   orbit(t = this.t): OrbitState {
-    const totalMin = (t - this.epoch) / MIN;
-    const phaseMin = ((totalMin % ORBIT_MIN) + ORBIT_MIN) % ORBIT_MIN;
-    const inPass = phaseMin >= PASS_START && phaseMin <= PASS_END;
-    const passFrac = inPass ? (phaseMin - PASS_START) / (PASS_END - PASS_START) : -1;
-    const minsToPass = inPass ? 0 : (PASS_START - phaseMin + ORBIT_MIN) % ORBIT_MIN;
+    const m = this.orbitModel;
+    const st = m.state(t);
+    const look = m.look(t);
+    const inPass = look.el >= m.cfg.minElDeg;
+    const ps = this.passes();
+    const currentPass = ps.find((p) => p.aos <= t && p.los >= t) ?? null;
+    const nextPass = ps.find((p) => p.aos > t) ?? null;
     return {
-      phaseMin,
-      sunlit: phaseMin < SUNLIT_MIN,
+      t,
+      lat: st.lat, lon: st.lon,
+      sunlit: st.sunlit,
       inPass,
-      passFrac,
-      elevation: inPass ? 5 + 80 * Math.sin(Math.PI * passFrac) : 0,
-      minsToPass,
-      orbitNo: Math.floor(totalMin / ORBIT_MIN) + 1,
+      elevation: look.el, az: look.az, rangeKm: look.rangeKm,
+      marginDb: inPass ? linkBudget(this.link, look.el, m.cfg.altKm).margin : null,
+      phaseMin: (st.argLatDeg / 360) * m.periodMin,
+      periodMin: m.periodMin,
+      minsToPass: inPass ? 0 : nextPass ? (nextPass.aos - t) / MIN : Infinity,
+      minsToSunChange: m.minsToSunChange(t),
+      currentPass,
+      nextPass,
+      orbitNo: Math.floor((t - this.epoch) / (m.periodMin * MIN)) + 1,
     };
+  }
+
+  private profCache: { key: number; sunlit: boolean[]; visible: boolean[] } | null = null;
+
+  /** Per-minute sunlit / GS-visible flags for the current revolution (from the ascending node). */
+  revolution() {
+    const o = this.orbit();
+    const start = this.t - o.phaseMin * MIN;
+    const key = Math.round(start / MIN);
+    if (this.profCache?.key !== key) {
+      const m = this.orbitModel;
+      const n = Math.ceil(m.periodMin);
+      const sunlit: boolean[] = [];
+      const visible: boolean[] = [];
+      for (let i = 0; i < n; i++) {
+        const t = start + i * MIN;
+        sunlit.push(m.state(t).sunlit);
+        visible.push(m.look(t).el >= m.cfg.minElDeg);
+      }
+      this.profCache = { key, sunlit, visible };
+    }
+    return this.profCache;
   }
 
   get battV() {
@@ -146,7 +204,7 @@ export class Simulator {
     f.glass = clamp(glass, -10, 60);
   }
 
-  private makeS(f: FarmSim, o: OrbitState, opts: { forceDay?: boolean; forceDry?: boolean } = {}): SPacket {
+  private makeS(f: FarmSim, o: Pick<OrbitState, 'sunlit' | 'inPass'>, opts: { forceDay?: boolean; forceDry?: boolean } = {}): SPacket {
     const sun = opts.forceDay ? 1 : sunFactor(this.t);
     const margin = f.glass - dewPoint(f.air, f.rh);
     const wetGlass = !opts.forceDry && margin < 0.3;
@@ -156,7 +214,8 @@ export class Simulator {
     if (wetGlass) dolp = clamp(0.35 + 0.45 * Math.random(), 0, 1);
     const ch = channelsFor(s0, clamp(dolp, 0, 1), this.rotation).map((v) => clamp(v + 0.004 * gauss(), 0, 3.3));
     const solar = o.sunlit ? clamp(5.1 + 0.6 * Math.abs(Math.cos((this.spin * Math.PI) / 180)) + 0.05 * gauss(), 0, 6) : 0;
-    const current = 118 + (o.inPass ? 92 : 0) + (sun > 0 ? 14 : 0) + 6 * gauss();
+    const pw = this.power;
+    const current = (1000 * (pw.loadW + (o.inPass ? pw.txW : 0))) / pw.busV + 3 * gauss();
     return {
       type: 'S', farm: f.id, t: new Date(this.t).toISOString(),
       i0: r(ch[0], 3), i45: r(ch[1], 3), i90: r(ch[2], 3), i135: r(ch[3], 3),
@@ -176,25 +235,28 @@ export class Simulator {
     };
   }
 
-  private linkMeta(o: OrbitState) {
-    const el = this.continuousLink && !o.inPass ? 35 : o.elevation;
-    const rssi = -122 + 0.42 * el + 2 * gauss();
-    const snr = -9 + 0.2 * el + 1 * gauss();
-    return { rssi: Math.round(rssi), snr: r(snr, 1) };
+  /** RSSI/SNR from the link budget at an elevation, with fading noise. */
+  private linkMeta(elDeg: number) {
+    const b = linkBudget(this.link, Math.max(elDeg, 1), this.orbitModel.cfg.altKm);
+    return { rssi: Math.round(b.rssi + 1.5 * gauss()), snr: r(b.snr + 1 * gauss(), 1) };
   }
 
   /** Advance the mission clock by one step and generate/route packets. */
   tick() {
+    const prev = this.t;
     this.t += this.stepMin * MIN;
     const o = this.orbit();
     const dt = this.stepMin;
 
-    // spacecraft
-    this.soc = clamp(this.soc + (o.sunlit ? 0.32 : -0.48) * dt + (o.inPass ? -0.08 * dt : 0), 3, 100);
+    // spacecraft energy balance (transmitting during passes costs extra)
+    const pw = this.power;
+    const netW = (o.sunlit ? pw.genSunlitW : 0) - pw.loadW - (o.inPass ? pw.txW : 0);
+    this.soc = clamp(this.soc + (100 * netW * (dt / 60)) / pw.battWh, 3, 100);
     const tTarget = o.sunlit ? 31 : 4;
     this.tempInt += (tTarget - this.tempInt) * (1 - Math.exp(-dt / 25));
     this.spin = (this.spin + 2.2 * dt + 360) % 360;
 
+    const crossed = (every: number) => Math.floor(this.t / (every * MIN)) > Math.floor(prev / (every * MIN));
     const out: Packet[] = [];
     for (const f of this.farms) {
       this.weather(f);
@@ -203,9 +265,10 @@ export class Simulator {
       const h = uaeHour(this.t);
       if (h > 10 && h < 17 && Math.random() < 0.0008 * dt) this.dustEvent(f);
       if (this.autoCrew) this.crew(f, h, dt);
-      out.push(this.makeS(f, o), this.makeN(f));
+      if (crossed(this.link.sEveryMin)) out.push(this.makeS(f, o));
+      if (crossed(this.link.nEveryMin)) out.push(this.makeN(f));
     }
-    this.route(out, o);
+    this.route(out, prev);
   }
 
   dustEvent(f: FarmSim, amount = 0.18 + 0.2 * Math.random()) {
@@ -229,26 +292,47 @@ export class Simulator {
     }
   }
 
-  private route(pkts: Packet[], o: OrbitState) {
+  /**
+   * Everything goes into the on-board store; during a pass the store is
+   * downlinked oldest-first, limited by LoRa airtime in the minutes where the
+   * link margin is positive.
+   */
+  private route(pkts: Packet[], prev: number) {
     this.generated += pkts.length;
-    const linkUp = o.inPass || this.continuousLink;
-    if (!linkUp) {
-      this.store.push(...pkts.map((p) => ({ ...p, via: 'store&fwd' as const })));
-      if (this.store.length > 1500) this.store.splice(0, this.store.length - 1500);
-      return;
+    const fresh = new Set(pkts);
+    this.store.push(...pkts);
+    if (this.store.length > this.storeCap) this.dropped += this.store.splice(0, this.store.length - this.storeCap).length;
+
+    let budgetMs = 0;
+    let bestEl = -90;
+    if (this.continuousLink) {
+      budgetMs = Infinity;
+      bestEl = 45;
+    } else {
+      const m = this.orbitModel;
+      for (let t = prev + MIN; t <= this.t; t += MIN) {
+        const el = m.look(t).el;
+        if (el < m.cfg.minElDeg) continue;
+        if (linkBudget(this.link, el, m.cfg.altKm).margin < 0) continue;
+        budgetMs += MIN;
+        bestEl = Math.max(bestEl, el);
+      }
     }
-    const meta = this.linkMeta(o);
-    // dump the on-board store first (oldest first), then live packets
-    if (this.store.length) {
-      for (const p of this.store) this.ground.ingest({ ...p, ...meta }, this.t);
-      this.relayed += this.store.length;
-      this.store = [];
-    }
-    for (const p of pkts) {
-      const via = p.type === 'N' ? 'relay' : 'direct';
-      if (via === 'relay') this.relayed++;
+    if (budgetMs <= 0 || !this.store.length) return;
+
+    const meta = this.linkMeta(bestEl);
+    const air = { S: airtimeMs(this.link.sBytes, this.link.sf, this.link.bwKHz), N: airtimeMs(this.link.nBytes, this.link.sf, this.link.bwKHz) };
+    let n = 0;
+    for (const p of this.store) {
+      const cost = air[p.type];
+      if (cost > budgetMs) break;
+      budgetMs -= cost;
+      n++;
+      const via = p.type === 'N' ? 'relay' : fresh.has(p) ? 'direct' : 'store&fwd';
+      if (via !== 'direct') this.relayed++;
       this.ground.ingest({ ...p, ...meta, via }, this.t);
     }
+    this.store.splice(0, n);
   }
 
   /**
@@ -261,23 +345,22 @@ export class Simulator {
     f.autoWeather = false;
     f.dust = sc.dust;
     this.ground.resetFarm(farmId);
+    // queued on-board readings for this farm are superseded by the scenario
+    this.store = this.store.filter((p) => p.farm !== farmId);
     const o = this.orbit();
-    const meta = this.linkMeta({ ...o, elevation: Math.max(o.elevation, 40) });
-    // dry-glass daylight readings first (dust is observed before the dew forms)
+    const meta = this.linkMeta(Math.max(o.elevation, 40));
+    const inject = (p: Packet) => this.ground.ingest({ ...p, ...meta, via: 'scenario' }, this.t);
+    // The mission clock is not advanced, so pass windows are never skipped.
+    // Dry-glass daylight readings first (dust is observed before the dew forms)…
     Object.assign(f, { air: 32, rh: 30, glass: 46 });
     for (let i = 0; i < 3; i++) {
-      this.t += MIN;
-      this.ground.ingest({ ...this.makeS(f, o, { forceDay: true, forceDry: true }), ...meta, via: 'scenario' }, this.t);
-      this.ground.ingest({ ...this.makeN(f), ...meta, via: 'scenario' }, this.t);
+      inject(this.makeS(f, o, { forceDay: true, forceDry: true }));
+      inject(this.makeN(f));
     }
-    // then the scenario's dew-node conditions, then payload under those conditions
+    // …then the scenario's dew-node conditions, then payload under those conditions.
     Object.assign(f, { air: sc.air, rh: sc.rh, glass: sc.glass });
-    for (let i = 0; i < 3; i++) {
-      this.t += MIN;
-      this.ground.ingest({ ...this.makeN(f), ...meta, via: 'scenario' }, this.t);
-    }
-    this.t += MIN;
-    this.ground.ingest({ ...this.makeS(f, o, { forceDay: true }), ...meta, via: 'scenario' }, this.t);
+    for (let i = 0; i < 3; i++) inject(this.makeN(f));
+    inject(this.makeS(f, o, { forceDay: true }));
     f.dirtyMin = 0;
   }
 
@@ -285,7 +368,6 @@ export class Simulator {
   seed(hours: number) {
     const steps = Math.round((hours * 60) / this.stepMin);
     this.t -= steps * this.stepMin * MIN;
-    this.epoch -= steps * this.stepMin * MIN;
     const noor = this.farm('NoorAbuDhabi');
     for (let i = 0; i < steps; i++) {
       // scripted afternoon dust event so the opening view shows a WET DUST alert

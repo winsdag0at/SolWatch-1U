@@ -43,6 +43,7 @@ export function nightBands(t0: number, t1: number) {
 
 export function LineChart({
   series, height = 190, yMin, yMax, yFmt = (v: number) => v.toFixed(2), thresholds = [], range, showNight = true, ariaLabel,
+  xFmt = (t: number) => fmtTime(t), tipFmt = (t: number) => `${fmtTime(t, true)} UAE`,
 }: {
   series: Series[];
   height?: number;
@@ -53,6 +54,8 @@ export function LineChart({
   range: [number, number];
   showNight?: boolean;
   ariaLabel: string;
+  xFmt?: (t: number) => string;
+  tipFmt?: (t: number) => string;
 }) {
   const [ref, width] = useWidth<HTMLDivElement>();
   const [hover, setHover] = useState<number | null>(null);
@@ -146,7 +149,7 @@ export function LineChart({
         ))}
         {xTicks.map((t, i) => (
           <text key={i} x={x(t)} y={height - 6} textAnchor={i === 0 ? 'start' : i === xTickCount ? 'end' : 'middle'} className="axis">
-            {fmtTime(t)}
+            {xFmt(t)}
           </text>
         ))}
         {thresholds.map((th) => (
@@ -173,7 +176,7 @@ export function LineChart({
       </svg>
       {hoverAt != null && (
         <div className="tip" style={{ left: Math.min(Math.max(x(hoverAt) + 10, 0), width - 170) }}>
-          <b>{fmtTime(hoverAt, true)} UAE</b>
+          <b>{tipFmt(hoverAt)}</b>
           {hoverVals.map(({ s, p }) => (
             <div key={s.label}><i style={{ background: s.color }} />{s.label}: {p?.v == null ? '—' : yFmt(p.v)}{s.unit ?? ''}</div>
           ))}

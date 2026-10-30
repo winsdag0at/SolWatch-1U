@@ -1,8 +1,10 @@
 'use client';
 
 import { FARMS, GROUND_STATION } from '@/lib/farms';
-import { ORBIT_MIN, PASS_END, PASS_START, SUNLIT_MIN, type OrbitState } from '@/lib/sim';
+import type { OrbitState } from '@/lib/sim';
+import type { GeoPoint, Pass } from '@/lib/orbit';
 import { STATE_INFO, type CleanState } from '@/lib/ground';
+import { fmtTime } from './format';
 
 // ---- UAE schematic map ----------------------------------------------------
 
@@ -25,40 +27,65 @@ const UAE: [number, number][] = [
 ];
 const uaePath = UAE.map(([lo, la], i) => `${i ? 'L' : 'M'}${px(lo, la).map((v) => v.toFixed(1)).join(',')}`).join('') + 'Z';
 
-const TRACK_A = px(52.0, 22.0);
-const TRACK_B = px(56.9, 26.9);
+const inView = ([x, y]: readonly [number, number]) => x >= 0 && x <= W && y >= 0 && y <= H;
 
-export function UaeMap({ orbit, states, selected }: { orbit: OrbitState | null; states: Record<string, CleanState>; selected: string }) {
-  const sat = orbit && orbit.inPass
-    ? [TRACK_A[0] + (TRACK_B[0] - TRACK_A[0]) * orbit.passFrac, TRACK_A[1] + (TRACK_B[1] - TRACK_A[1]) * orbit.passFrac]
-    : null;
+/** Circle of `km` radius around a point, as an SVG path (equirectangular approx). */
+function circlePath(c: GeoPoint, km: number) {
+  const pts: string[] = [];
+  for (let i = 0; i <= 72; i++) {
+    const a = (i / 72) * 2 * Math.PI;
+    const lat = c.lat + (km / 111.2) * Math.cos(a);
+    const lon = c.lon + (km / (111.2 * Math.cos((c.lat * Math.PI) / 180))) * Math.sin(a);
+    pts.push(px(lon, lat).map((v) => v.toFixed(1)).join(','));
+  }
+  return `M${pts.join('L')}Z`;
+}
+
+export function UaeMap({ orbit, track, footprintKm, states, selected }: {
+  orbit: OrbitState | null; track: GeoPoint[]; footprintKm: number; states: Record<string, CleanState>; selected: string;
+}) {
   const gs = px(GROUND_STATION.lon, GROUND_STATION.lat);
+  const sat = orbit ? px(orbit.lon, orbit.lat) : null;
+  // split the ground track where it wraps around the antimeridian
+  const segs: string[] = [];
+  let d = '';
+  track.forEach((p, i) => {
+    if (i && Math.abs(p.lon - track[i - 1].lon) > 180) { segs.push(d); d = ''; }
+    d += `${d ? 'L' : 'M'}${px(p.lon, p.lat).map((v) => v.toFixed(1)).join(',')}`;
+  });
+  segs.push(d);
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="map" role="img" aria-label="Schematic map of the UAE showing solar farms, ground station and satellite pass">
+    <svg viewBox={`0 0 ${W} ${H}`} className="map" role="img" aria-label="Map of the UAE with solar farms, ground station, satellite ground track and visibility circle">
       <defs>
         <pattern id="grid" width="26" height="26" patternUnits="userSpaceOnUse">
           <path d="M26 0H0V26" fill="none" stroke="var(--grid)" strokeWidth="1" />
         </pattern>
-        <radialGradient id="foot">
-          <stop offset="0" stopColor="var(--accent)" stopOpacity=".35" />
-          <stop offset="1" stopColor="var(--accent)" stopOpacity="0" />
-        </radialGradient>
+        <clipPath id="mapclip"><rect width={W} height={H} /></clipPath>
       </defs>
       <rect width={W} height={H} fill="var(--sea)" />
       <rect width={W} height={H} fill="url(#grid)" />
       <path d={uaePath} fill="var(--land)" stroke="var(--land-edge)" strokeWidth={1.5} />
       <text x={px(53.2, 23.4)[0]} y={px(53.2, 23.4)[1]} className="map-l" opacity={0.5}>UNITED ARAB EMIRATES</text>
       <text x={px(52.2, 25.6)[0]} y={px(52.2, 25.6)[1]} className="map-l" opacity={0.4}>Arabian Gulf</text>
-      <line x1={TRACK_A[0]} y1={TRACK_A[1]} x2={TRACK_B[0]} y2={TRACK_B[1]} stroke="var(--accent)" strokeDasharray="5 6" opacity={orbit?.inPass ? 0.9 : 0.35} />
-      <text x={TRACK_B[0] - 140} y={TRACK_B[1] + 38} className="map-l" fill="var(--accent)" opacity={0.8}>ground track ↗</text>
-      {sat && (
-        <g>
-          <circle cx={sat[0]} cy={sat[1]} r={95} fill="url(#foot)" />
-          <line x1={sat[0]} y1={sat[1]} x2={gs[0]} y2={gs[1]} stroke="var(--clean)" strokeDasharray="2 4" />
-          <rect x={sat[0] - 7} y={sat[1] - 7} width={14} height={14} fill="var(--text)" stroke="var(--accent)" strokeWidth={2} />
-          <line x1={sat[0] - 18} y1={sat[1]} x2={sat[0] + 18} y2={sat[1]} stroke="var(--accent)" strokeWidth={3} />
-          <text x={sat[0] + 14} y={sat[1] - 12} className="map-l" fill="var(--text)">SolWatch-1U</text>
-        </g>
+      <g clipPath="url(#mapclip)">
+        {orbit && (
+          <path d={circlePath({ lat: orbit.lat, lon: orbit.lon }, footprintKm)} fill={orbit.inPass ? 'rgba(56,189,248,.10)' : 'rgba(148,163,184,.06)'}
+            stroke="var(--accent)" strokeOpacity={orbit.inPass ? 0.7 : 0.25} strokeDasharray="3 5" />
+        )}
+        {segs.map((sd, i) => <path key={i} d={sd} fill="none" stroke="var(--accent)" strokeDasharray="5 6" opacity={0.75} />)}
+        {sat && orbit?.inPass && <line x1={sat[0]} y1={sat[1]} x2={gs[0]} y2={gs[1]} stroke="var(--clean)" strokeDasharray="2 4" />}
+        {sat && inView(sat) && (
+          <g>
+            <rect x={sat[0] - 7} y={sat[1] - 7} width={14} height={14} fill="var(--text)" stroke="var(--accent)" strokeWidth={2} />
+            <line x1={sat[0] - 18} y1={sat[1]} x2={sat[0] + 18} y2={sat[1]} stroke="var(--accent)" strokeWidth={3} />
+            <text x={sat[0] + 14} y={sat[1] - 12} className="map-l" fill="var(--text)">SolWatch-1U</text>
+          </g>
+        )}
+      </g>
+      {orbit && sat && !inView(sat) && (
+        <text x={8} y={H - 10} className="map-l" fill="var(--muted)">
+          Satellite now at {orbit.lat.toFixed(1)}°, {orbit.lon.toFixed(1)}° — {Math.round(orbit.rangeKm)} km from GS
+        </text>
       )}
       <g>
         <path d={`M${gs[0]},${gs[1] - 12}l7,12h-14z`} fill="var(--clean)" />
@@ -71,7 +98,7 @@ export function UaeMap({ orbit, states, selected }: { orbit: OrbitState | null; 
           <g key={f.id}>
             {f.id === selected && <circle cx={x} cy={y} r={13} fill="none" stroke="var(--text)" strokeWidth={1.5} />}
             <circle cx={x} cy={y} r={7} fill={STATE_INFO[st].color} stroke="var(--bg)" strokeWidth={2} />
-            <text x={x + 14} y={y + 4} className="map-l" fill="var(--text)">{FARMS.find((g) => g.id === f.id)!.short}</text>
+            <text x={x + 14} y={y + 4} className="map-l" fill="var(--text)">{f.short}</text>
           </g>
         );
       })}
@@ -81,27 +108,71 @@ export function UaeMap({ orbit, states, selected }: { orbit: OrbitState | null; 
 
 // ---- Orbit ring -------------------------------------------------------------
 
-export function OrbitRing({ orbit, size = 170 }: { orbit: OrbitState | null; size?: number }) {
+/** One revolution from the ascending node; `sunlit`/`visible` are per-minute samples. */
+export function OrbitRing({ orbit, sunlit, visible, size = 170 }: { orbit: OrbitState | null; sunlit: boolean[]; visible: boolean[]; size?: number }) {
   const c = size / 2;
   const r = c - 14;
-  const ang = (min: number) => (min / ORBIT_MIN) * 2 * Math.PI - Math.PI / 2;
+  const P = orbit?.periodMin ?? 95;
+  const ang = (min: number) => (min / P) * 2 * Math.PI - Math.PI / 2;
   const p = (min: number, rr = r) => [c + rr * Math.cos(ang(min)), c + rr * Math.sin(ang(min))];
   const arc = (m0: number, m1: number, rr = r) => {
     const [x0, y0] = p(m0, rr);
     const [x1, y1] = p(m1, rr);
-    const large = m1 - m0 > ORBIT_MIN / 2 ? 1 : 0;
+    const large = m1 - m0 > P / 2 ? 1 : 0;
     return `M${x0},${y0}A${rr},${rr} 0 ${large} 1 ${x1},${y1}`;
+  };
+  const runs = (flags: boolean[]) => {
+    const out: [number, number, boolean][] = [];
+    flags.forEach((f, i) => {
+      const last = out[out.length - 1];
+      if (last && last[2] === f) last[1] = i + 1;
+      else out.push([i, i + 1, f]);
+    });
+    return out;
   };
   const sat = orbit ? p(orbit.phaseMin) : null;
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label="Orbit diagram with sunlit, eclipse and ground pass arcs">
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label="Orbit diagram with sunlit, eclipse and ground-station visibility arcs">
       <circle cx={c} cy={c} r={r * 0.48} fill="#0b3b66" />
-      <path d={`M${c},${c - r * 0.48}A${r * 0.48},${r * 0.48} 0 0 0 ${c},${c + r * 0.48}Z`} fill="#000" opacity={0.45} />
-      <path d={arc(0, SUNLIT_MIN)} stroke="var(--sun)" strokeWidth={5} fill="none" opacity={0.85} />
-      <path d={arc(SUNLIT_MIN, ORBIT_MIN - 0.01)} stroke="#475569" strokeWidth={5} fill="none" />
-      <path d={arc(PASS_START, PASS_END, r + 8)} stroke="var(--clean)" strokeWidth={3} fill="none" />
-      {sat && <circle cx={sat[0]} cy={sat[1]} r={6} fill="var(--text)" stroke="var(--accent)" strokeWidth={2} style={{ transition: 'cx .8s, cy .8s' }} />}
-      <text x={c} y={c + 4} textAnchor="middle" className="map-l" fill="var(--text)">{orbit ? `${orbit.phaseMin.toFixed(0)} / ${ORBIT_MIN} min` : '—'}</text>
+      {runs(sunlit).map(([a, b, lit], i) => (
+        <path key={i} d={arc(a, Math.min(b, P - 0.01))} stroke={lit ? 'var(--sun)' : '#475569'} strokeWidth={5} fill="none" opacity={lit ? 0.85 : 1} />
+      ))}
+      {runs(visible).filter(([, , v]) => v).map(([a, b], i) => (
+        <path key={i} d={arc(a, Math.max(b, a + 0.5), r + 8)} stroke="var(--clean)" strokeWidth={3} fill="none" />
+      ))}
+      <text x={c} y={14} textAnchor="middle" className="map-l" fontSize={10}>▲ asc. node</text>
+      {sat && <circle cx={sat[0]} cy={sat[1]} r={6} fill="var(--text)" stroke="var(--accent)" strokeWidth={2} />}
+      <text x={c} y={c + 4} textAnchor="middle" className="map-l" fill="var(--text)">{orbit ? `${orbit.phaseMin.toFixed(0)} / ${P.toFixed(1)} min` : '—'}</text>
+    </svg>
+  );
+}
+
+/** Azimuth/elevation polar plot of a pass as seen from the ground station. */
+export function SkyPlot({ pass, now, size = 170 }: { pass: Pass | null; now: { az: number; el: number } | null; size?: number }) {
+  const c = size / 2;
+  const R = c - 16;
+  const xy = (az: number, el: number) => {
+    const rr = R * (1 - el / 90);
+    const a = (az * Math.PI) / 180;
+    return [c + rr * Math.sin(a), c - rr * Math.cos(a)];
+  };
+  const d = pass?.track.map((p, i) => `${i ? 'L' : 'M'}${xy(p.az, p.el).map((v) => v.toFixed(1)).join(',')}`).join('') ?? '';
+  const start = pass?.track[0];
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label="Sky plot of the satellite pass seen from the ground station">
+      {[0, 30, 60].map((el) => <circle key={el} cx={c} cy={c} r={R * (1 - el / 90)} fill="none" stroke="var(--grid)" />)}
+      <line x1={c} y1={c - R} x2={c} y2={c + R} stroke="var(--grid)" />
+      <line x1={c - R} y1={c} x2={c + R} y2={c} stroke="var(--grid)" />
+      {(['N', 'E', 'S', 'W'] as const).map((l, i) => {
+        const [x, y] = xy(i * 90, -12);
+        return <text key={l} x={x} y={y + 4} textAnchor="middle" className="compass-l" fill={l === 'N' ? 'var(--wetdust)' : 'var(--muted)'}>{l}</text>;
+      })}
+      <text x={c + 3} y={c - R * (2 / 3) - 2} className="map-l" fontSize={9}>30°</text>
+      <text x={c + 3} y={c - R * (1 / 3) - 2} className="map-l" fontSize={9}>60°</text>
+      {d && <path d={d} fill="none" stroke="var(--accent)" strokeWidth={2.5} strokeLinecap="round" />}
+      {start && (() => { const [x, y] = xy(start.az, start.el); return <circle cx={x} cy={y} r={3.5} fill="var(--clean)" />; })()}
+      {now && now.el > 0 && (() => { const [x, y] = xy(now.az, now.el); return <rect x={x - 5} y={y - 5} width={10} height={10} fill="var(--text)" stroke="var(--accent)" strokeWidth={2} />; })()}
+      {pass && <text x={c} y={size - 2} textAnchor="middle" className="map-l" fontSize={10}>{fmtTime(pass.aos)}–{fmtTime(pass.los)} · max {pass.maxEl.toFixed(0)}°</text>}
     </svg>
   );
 }

@@ -2,12 +2,13 @@
 
 import { useState } from 'react';
 import { ChannelBars, Compass, Gauge, LineChart, Meter, CH_COLORS } from './charts';
-import { OrbitRing, UaeMap } from './visuals';
+import { OrbitRing, SkyPlot, UaeMap } from './visuals';
 import { ago, fmtTime, signed } from './format';
 import { DOLP_CLEAN, THRESH, soilingLossPct, battPercent } from '@/lib/physics';
 import { GroundProcessor, STATE_INFO, explain, type CleanState, type FarmGround } from '@/lib/ground';
 import { FARMS, farmShort } from '@/lib/farms';
-import { ORBIT_MIN, SUNLIT_MIN, type OrbitState, type Simulator } from '@/lib/sim';
+import type { OrbitState, Simulator } from '@/lib/sim';
+import { footprintRadiusKm } from '@/lib/orbit';
 
 export interface View {
   ground: GroundProcessor;
@@ -243,9 +244,9 @@ export function HealthPanel({ v }: { v: View }) {
                 <small>Illumination</small>
                 <b className={sunlit ? 'sunlit' : 'eclipse'}>{sunlit ? '☀ Sunlit' : '● Eclipse'}</b>
                 <em>
-                  {v.orbit
-                    ? `${Math.round((v.orbit.sunlit ? SUNLIT_MIN : ORBIT_MIN) - v.orbit.phaseMin)} min to ${v.orbit.sunlit ? 'eclipse' : 'sunlight'}`
-                    : 'from solar V'}
+                  {v.orbit?.minsToSunChange != null
+                    ? `${v.orbit.minsToSunChange} min to ${v.orbit.sunlit ? 'eclipse' : 'sunlight'}`
+                    : v.orbit ? 'continuous sunlight' : 'from solar V'}
                 </em>
               </div>
             </div>
@@ -271,37 +272,81 @@ export function HealthPanel({ v }: { v: View }) {
 export function OrbitPanel({ v }: { v: View }) {
   const states = Object.fromEntries([...v.ground.farms.values()].map((f) => [f.id, f.state])) as Record<string, CleanState>;
   const link = v.ground.lastLink;
-  const linkFresh = link && (v.orbit ? v.orbit.inPass || v.sim?.continuousLink : v.now - link.t < 90_000);
   const o = v.orbit;
+  const sim = v.sim;
+  const linkFresh = link && (o ? o.inPass || sim?.continuousLink : v.now - link.t < 90_000);
+  const cfg = sim?.orbitModel.cfg;
+  const rev = sim?.revolution();
+  const track = sim ? sim.orbitModel.track(v.now - 12 * 60_000, v.now + 12 * 60_000) : [];
+  const upcoming = sim ? sim.passes().filter((p) => p.los >= v.now).slice(0, 5) : [];
+  const skyPass = o?.currentPass ?? o?.nextPass ?? null;
   return (
-    <Card id="orbit" title="Orbit & link" sub={v.live ? 'Live: orbit position needs TLE propagation (not in Phase 1)' : '~95 min orbit · ~60 min sunlit · ~15 orbits/day'} right={<SimTag live={v.live} />} className="span2">
+    <Card id="orbit" title="Orbit & link"
+      sub={v.live ? 'Live: orbit position needs the TLE after deployment' : `${cfg?.label} · i ${sim?.orbitModel.incDeg.toFixed(1)}° · T ${o?.periodMin.toFixed(1)} min · GS mask ${cfg?.minElDeg}°`}
+      right={<SimTag live={v.live} />} className="span2">
       <div className="orbit-wrap">
-        <UaeMap orbit={o} states={states} selected={v.farmId} />
+        <UaeMap orbit={o} track={track} footprintKm={cfg ? footprintRadiusKm(cfg.minElDeg, cfg.altKm) : 0} states={states} selected={v.farmId} />
         <div className="orbit-side">
-          <OrbitRing orbit={o} />
+          {o && rev && <OrbitRing orbit={o} sunlit={rev.sunlit} visible={rev.visible} />}
           <div className="orbit-legend">
             <span><i style={{ background: 'var(--sun)' }} />Sunlit</span>
             <span><i style={{ background: '#475569' }} />Eclipse</span>
-            <span><i style={{ background: 'var(--clean)' }} />GS pass</span>
+            <span><i style={{ background: 'var(--clean)' }} />GS visible</span>
           </div>
           {o && (
             <p className="note">
-              Orbit #{o.orbitNo} · {o.inPass ? `In pass, elevation ${o.elevation.toFixed(0)}°` : `Next pass in ${Math.round(o.minsToPass)} min`}
-              {v.sim?.continuousLink && ' · continuous-link demo ON'}
+              {o.inPass
+                ? `In pass · el ${o.elevation.toFixed(0)}° · az ${o.az.toFixed(0)}° · ${Math.round(o.rangeKm)} km · margin ${o.marginDb?.toFixed(1)} dB`
+                : Number.isFinite(o.minsToPass) ? `Next pass in ${fmtDur(o.minsToPass)}` : 'No pass in the next 30 h'}
+              {sim?.continuousLink && ' · continuous-link demo ON'}
             </p>
           )}
-          <p className="note small">Pass schedule compressed for the demo (real LEO: 2–4 passes/day of ~8 min).</p>
         </div>
       </div>
+      {sim && (
+        <div className="pass-row">
+          <div className="sky">
+            <SkyPlot pass={skyPass} now={o?.inPass ? { az: o.az, el: o.elevation } : null} />
+            <span className="gauge-label">{o?.currentPass ? 'Current pass' : 'Next pass'} (sky view from GS)</span>
+          </div>
+          <div className="passes">
+            <table>
+              <thead><tr><th>AOS (UAE)</th><th>Dur.</th><th>Max el</th><th>Light</th><th>Use</th></tr></thead>
+              <tbody>
+                {upcoming.map((p) => {
+                  const h = ((p.tca / 3_600_000 + 4) % 24 + 24) % 24;
+                  const predawn = h >= 2 && h < 6.5;
+                  const live = p.aos <= v.now && p.los >= v.now;
+                  return (
+                    <tr key={p.aos} className={live ? 'live-pass' : ''}>
+                      <td className="mono">{fmtTime(p.aos, true)}</td>
+                      <td className="mono">{((p.los - p.aos) / 60_000).toFixed(1)} min</td>
+                      <td className="mono">{p.maxEl.toFixed(0)}°</td>
+                      <td>{p.daylight ? '☀ day' : '☾ night'}</td>
+                      <td className="muted">{predawn ? 'pre-dawn dew alert' : p.daylight ? 'payload + downlink' : 'relay dew data'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <p className="note small">Propagated from the candidate orbit (J2, spherical Earth). Phase and node are set for the demo; real times come from the TLE after deployment.</p>
+          </div>
+        </div>
+      )}
       <div className="link-grid">
-        <Tile label="LoRa RSSI" value={linkFresh && link ? String(link.rssi) : '—'} unit=" dBm" tone={linkFresh ? 'var(--clean)' : undefined} hint="433 MHz SX1278" />
+        <Tile label="LoRa RSSI" value={linkFresh && link ? String(link.rssi) : '—'} unit=" dBm" tone={linkFresh ? 'var(--clean)' : undefined} hint={`433 MHz · SF${sim?.link.sf ?? '–'}`} />
         <Tile label="SNR" value={linkFresh && link ? link.snr.toFixed(1) : '—'} unit=" dB" />
         <Tile label="Packets received" value={String(v.ground.received)} hint="at ground station" />
-        <Tile label="Stored on board" value={String(v.sim?.store.length ?? '—')} hint="awaiting pass" tone={v.sim?.store.length ? 'var(--dust)' : undefined} />
-        <Tile label="Relayed" value={String(v.sim?.relayed ?? '—')} hint="store-and-forward" />
+        <Tile label="Stored on board" value={String(sim?.store.length ?? '—')} hint={sim?.dropped ? `${sim.dropped} dropped (buffer full)` : 'awaiting pass'} tone={sim?.store.length ? 'var(--dust)' : undefined} />
+        <Tile label="Relayed" value={String(sim?.relayed ?? '—')} hint="store-and-forward" />
       </div>
     </Card>
   );
+}
+
+function fmtDur(min: number) {
+  if (min < 90) return `${Math.round(min)} min`;
+  return `${Math.floor(min / 60)} h ${Math.round(min % 60)} min`;
 }
 
 // ---- 7. Packet log ------------------------------------------------------------------

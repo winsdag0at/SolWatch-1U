@@ -31,13 +31,29 @@ The site is a static export (`output: 'export'`), so any static host works:
 
 A service worker caches the page after the first visit, so Simulation mode keeps working offline.
 
+## Pages
+
+| Tab | What it shows |
+|---|---|
+| **Operations** | Cleaning orders, payload, dew, health, orbit & link (real propagated passes, sky plot), packet log, simulation controls, Live mode |
+| **Mission & budgets** | Objectives, success criteria, orbit trade study (60-day propagation), link / data / power / mass budgets, requirements traceability |
+| **Lab validation** | Bench-test procedure and an editable/CSV table of readings; fits clean-glass DoLP and PV-loss-per-SI and applies them to the decision engine. Ships with clearly labelled EXAMPLE data |
+| **Impact** | One-year model of fixed wet-wash schedule vs SolWatch-guided cleaning: water saved, energy and revenue recovered, trigger sensitivity, cited inputs |
+
+Budget, bench and impact inputs are saved in the browser (localStorage).
+
 ## Structure
 
 | Path | Purpose |
 |---|---|
 | `lib/physics.ts` | Stokes / DoLP / AoLP, Soiling Index, Magnus dew point, channel forward model, battery curve, Cementing Risk Index |
 | `lib/ground.ts` | Packet validation and the 4-state cleaning decision (dead bands, 3-reading persistence, SI hold on wet glass) |
-| `lib/sim.ts` | Simulator: diurnal weather, dust build-up and wind events, 95-min orbit (60 sunlit), battery/thermal model, LoRa store-and-forward |
+| `lib/sim.ts` | Simulator: diurnal weather, dust build-up and wind events, EPS/thermal model, LoRa store-and-forward limited by real pass time and airtime |
+| `lib/orbit.ts` | Circular-orbit propagator (J2 node precession, Sun ephemeris, Earth shadow), look angles, pass prediction |
+| `lib/link.ts` | LoRa link budget (SX1278 sensitivity), time-on-air |
+| `lib/mission.ts` | Power, mass, data budgets and orbit trade analysis |
+| `lib/calibration.ts` | Bench-data analysis: clean DoLP, loss-per-SI fit, detection limit, rotation invariance |
+| `lib/impact.ts` | Annual cleaning-strategy model |
 | `lib/live.ts` | Live connectors: Firebase RTDB stream, HTTP JSON poll, ThingSpeak feed |
 | `components/` | Dashboard UI and the hand-built SVG charts (no chart library) |
 

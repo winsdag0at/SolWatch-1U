@@ -4,6 +4,13 @@
 /** Measured DoLP of clean panel glass (lab calibration). */
 export const DOLP_CLEAN = 0.84;
 
+/**
+ * Active calibration used by the ground-station decision engine. Defaults
+ * match the mission design; the Lab validation page can replace them with
+ * constants fitted to bench data.
+ */
+export const CAL = { dolpClean: DOLP_CLEAN, lossPerSI: 30, source: 'design default' as string };
+
 /** Minimum S0 (V) for a payload reading to count — below this the farm is dark. */
 export const S0_MIN_VALID = 0.5;
 
@@ -36,8 +43,8 @@ export function stokes(i0: number, i45: number, i90: number, i135: number): Stok
   return { s0, s1, s2, dolp, aolp };
 }
 
-export function soilingIndex(dolp: number): number {
-  return clamp(1 - dolp / DOLP_CLEAN, 0, 1);
+export function soilingIndex(dolp: number, dolpClean = CAL.dolpClean): number {
+  return clamp(1 - dolp / dolpClean, 0, 1);
 }
 
 /** Magnus dew point, b = 17.62, c = 243.12 °C. */
@@ -107,5 +114,5 @@ export function cementingRisk(si: number, margin: number | null, wetPlate: numbe
   return Math.round(100 * Math.sqrt(dust * wet));
 }
 
-/** Rough model of PV output lost to soiling, for context only. */
-export const soilingLossPct = (si: number) => 30 * si;
+/** PV output lost to soiling, from the bench-fitted loss-per-SI slope. */
+export const soilingLossPct = (si: number) => CAL.lossPerSI * si;
